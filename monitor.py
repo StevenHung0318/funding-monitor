@@ -18,14 +18,54 @@ STATE_FILE = "state.json"
 
 
 def get_binance_recent_funding(symbol, limit=5):
+    """幣安 API - 加上 headers 模擬瀏覽器"""
     url = "https://fapi.binance.com/fapi/v1/fundingRate"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
     try:
-        resp = requests.get(url, params={"symbol": symbol, "limit": limit}, timeout=10)
-        data = resp.json()
-        if isinstance(data, list) and len(data) >= 2:
-            return data
+        resp = requests.get(
+            url, 
+            params={"symbol": symbol, "limit": limit}, 
+            headers=headers,
+            timeout=15
+        )
+        print(f"  [Binance API] Status: {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and len(data) >= 2:
+                return data
+        else:
+            print(f"  [Binance API] Response: {resp.text[:200]}")
     except Exception as e:
-        print(f"[Binance] Error: {e}")
+        print(f"  [Binance] Error: {e}")
+    return None
+
+
+def get_binance_funding_via_public(symbol):
+    """備用方案：用幣安公開數據頁面"""
+    url = f"https://www.binance.com/fapi/v1/fundingRate"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "*/*",
+        "Origin": "https://www.binance.com",
+        "Referer": "https://www.binance.com/",
+    }
+    try:
+        resp = requests.get(
+            url,
+            params={"symbol": symbol, "limit": 5},
+            headers=headers,
+            timeout=15
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and len(data) >= 2:
+                print(f"  [Binance Backup] Success!")
+                return data
+    except Exception as e:
+        print(f"  [Binance Backup] Error: {e}")
     return None
 
 
@@ -37,7 +77,7 @@ def get_okx_recent_funding(inst_id, limit=5):
         if result.get("code") == "0" and result.get("data"):
             return result["data"]
     except Exception as e:
-        print(f"[OKX] Error: {e}")
+        print(f"  [OKX] Error: {e}")
     return None
 
 
@@ -124,13 +164,29 @@ def main():
         name = monitor["name"]
         key = f"{exchange}_{symbol}"
         
+        print(f"\n  Checking {exchange.upper()} {name}...")
+        
         if exchange == "binance":
+            # 先試主要 API
             data = get_binance_recent_funding(symbol)
+            # 失敗就試備用
+            if not data:
+                print("  [Binance] Trying backup...")
+                data = get_binance_funding_via_public(symbol)
         else:
             data = get_okx_recent_funding(symbol)
         
         if not data:
+            print(f"  [{exchange.upper()}] Failed to get data!")
+            # 發送錯誤通知（只發一次）
+            error_key = f"{key}_error"
+            if not state.get(error_key):
+                send_telegram(f"⚠️ <b>{exchange.upper()} {name}</b>\nAPI 無法連線，請檢查")
+                state[error_key] = True
             continue
+        
+        # 清除錯誤標記
+        state.pop(f"{key}_error", None)
         
         interval_hours, price = calculate_interval(data, exchange)
         interval_mode = classify_interval(interval_hours)
@@ -167,7 +223,7 @@ def main():
         send_telegram(alert)
     
     if not alerts:
-        print("No changes")
+        print("\nNo changes")
 
 
 if __name__ == "__main__":
